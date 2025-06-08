@@ -7,20 +7,28 @@ trainer:
     class_path: pytorch_lightning.loggers.CSVLogger
     init_args:
       save_dir: output
-      name: food101
+      name: swin
   max_steps: 5000
   val_check_interval: 500
 model:
-  model_name: vit-b16-224-in21k
-  training_mode: full
+  model_name: "swin"
+  training_mode: lora
   optimizer: sgd
-  lr: 0.03
+  lr: 0.05
   momentum: 0.9
   weight_decay: 0.0
-  scheduler: cosine
+  scheduler: cosine_restart
   warmup_steps: 500
+  lora_r: 8
+  lora_alpha: 8
+
+  min_lr: 1e-5
+  t_0: 1500
+  t_mul: 1
+  decay: 0.6
+
 data:
-  dataset: food101
+  dataset: cifar100
   root: data/
   size: 224
   batch_size: 128
@@ -28,5 +36,5 @@ data:
 model_checkpoint:
   filename: best-step-{step}-{val_acc:.4f}
   monitor: val_acc
-  save_last: true
   mode: max
+  save_last: true

@@ -30,6 +30,7 @@ class MyLightningCLI(LightningCLI):
         parser.link_arguments(
             "data.num_classes", "model.n_classes", apply_on="instantiate"
         )
+        
 
 
 torch.backends.cuda.matmul.allow_tf32 = True

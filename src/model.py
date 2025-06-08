@@ -7,11 +7,13 @@ import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model
 from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import LambdaLR
+from src.scheduler import CustomReduceOnPlateau, DecayingCosineAnnealingWarmRestartsWithShuffle
 from torchmetrics import MetricCollection
 from torchmetrics.classification.accuracy import Accuracy
 from torchmetrics.classification.stat_scores import StatScores
 from transformers import AutoConfig, AutoModelForImageClassification
 from transformers.optimization import get_cosine_schedule_with_warmup
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from src.loss import SoftTargetCrossEntropy
 from src.mixup import Mixup
@@ -34,6 +36,7 @@ MODEL_DICT = {
     "vit-s8-224-dino": "facebook/dino-vits8",
     "beit-b16-224-in21k": "microsoft/beit-base-patch16-224-pt22k-ft22k",
     "beit-l16-224-in21k": "microsoft/beit-large-patch16-224-pt22k-ft22k",
+    "swin": "microsoft/swin-tiny-patch4-window7-224"
 }
 
 
@@ -62,6 +65,19 @@ class ClassificationModel(pl.LightningModule):
         lora_dropout: float = 0.0,
         lora_bias: str = "none",
         from_scratch: bool = False,
+        t_0: int = 10,
+        t_mul: int = 2,
+        decay: float = 0.5,
+        min_lr: float = 1e-6,
+        factor: float = 0.5,
+        patience: int = 5,
+        threshold: float = 1e-4,
+        threshold_mode: str = "rel",
+        cooldown: int = 0,
+        injection_prob: float = 0.2,
+        injection_mode: str = "fixed",
+        injection_factor: float = 1.5
+
     ):
         """Classification Model
 
@@ -115,6 +131,20 @@ class ClassificationModel(pl.LightningModule):
         self.lora_bias = lora_bias
         self.from_scratch = from_scratch
 
+        self.t_0 = t_0
+        self.t_mul = t_mul
+        self.decay = decay
+        self.min_lr = min_lr
+        self.factor = factor,
+        self.patience = patience
+        self.threshold = threshold
+        self.threshold_mode = threshold_mode
+        self.cooldown = cooldown
+        self.injection_prob = injection_prob
+        self.injection_mode = injection_mode
+
+        print(self.t_0, self.t_mul, self.decay, self.min_lr, self.factor, self.patience, self.threshold, self.threshold_mode, self.cooldown, self.injection_prob, self.injection_mode)
+
         # Initialize network
         try:
             model_path = MODEL_DICT[self.model_name]
@@ -137,6 +167,7 @@ class ClassificationModel(pl.LightningModule):
                 ignore_mismatched_sizes=True,
                 image_size=self.image_size,
             )
+            print(self.n_classes)
 
         # Load checkpoint weights
         if self.weights:
@@ -226,7 +257,8 @@ class ClassificationModel(pl.LightningModule):
         self.test_metric_outputs = []
 
     def forward(self, x):
-        return self.net(pixel_values=x).logits
+        a = self.net(pixel_values=x).logits
+        return a
 
     def shared_step(self, batch, mode="train"):
         x, y = batch
@@ -318,6 +350,29 @@ class ClassificationModel(pl.LightningModule):
                 num_training_steps=int(self.trainer.estimated_stepping_batches),
                 num_warmup_steps=self.warmup_steps,
             )
+        elif self.scheduler == "custom_plateau":
+            scheduler = CustomReduceOnPlateau(
+                optimizer, mode="max", factor=self.factor, patience=self.patience, injection_prob=self.injection_prob,
+                injection_factor=self.injection_factor, injection_mode=self.injection_mode,
+                threshold=self.threshold, threshold_mode=self.threshold_mode, cooldown=self.cooldown, min_lr=self.min_lr
+            )
+
+        elif self.scheduler == "cosine-warm-restarts":
+            scheduler = DecayingCosineAnnealingWarmRestartsWithShuffle(
+                optimizer, T_0=self.t_0, T_mult=self.t_mul, decay_factor=self.decay, eta_min=self.min_lr
+            )
+        elif self.scheduler == "plateau":
+                    scheduler = ReduceLROnPlateau(
+                        optimizer,
+                        mode="max",
+                        factor=self.factor,
+                        patience=self.patience,
+                        threshold=self.threshold,
+                        threshold_mode=self.threshold_mode,
+                        cooldown=self.cooldown,
+                        min_lr=self.min_lr
+                    )
+                
         elif self.scheduler == "none":
             scheduler = LambdaLR(optimizer, lambda _: 1)
         else:
@@ -331,4 +386,5 @@ class ClassificationModel(pl.LightningModule):
                 "scheduler": scheduler,
                 "interval": "step",
             },
+            "monitor": "val_acc"
         }
