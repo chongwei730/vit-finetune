@@ -150,6 +150,7 @@ venv.bak/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+Miniconda3-latest-Linux-x86_64.sh
 config_list.txt
 
 # Pyre type checker
