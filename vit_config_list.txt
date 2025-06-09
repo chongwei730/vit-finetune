@@ -1,0 +1,4 @@
+configs/cosine_restart/vit/cifar_lora.yaml
+configs/cosine/vit/cifar_lora.yaml
+configs/plateau/vit/cifar_lora.yaml
+configs/random_plateau/vit/cifar_lora.yaml

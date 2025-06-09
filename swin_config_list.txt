@@ -1,0 +1,4 @@
+configs/cosine_restart/swin/cifar_lora.yaml
+configs/cosine/swin/cifar_lora.yaml
+configs/plateau/swin/cifar_lora.yaml
+configs/random_plateau/swin/cifar_lora.yaml

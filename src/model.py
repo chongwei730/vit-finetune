@@ -135,15 +135,18 @@ class ClassificationModel(pl.LightningModule):
         self.t_mul = t_mul
         self.decay = decay
         self.min_lr = min_lr
-        self.factor = factor,
+        self.factor = factor
         self.patience = patience
         self.threshold = threshold
         self.threshold_mode = threshold_mode
         self.cooldown = cooldown
         self.injection_prob = injection_prob
         self.injection_mode = injection_mode
+        self.injection_factor = injection_factor
+        self.last_val_acc = torch.tensor(0.0)
 
         print(self.t_0, self.t_mul, self.decay, self.min_lr, self.factor, self.patience, self.threshold, self.threshold_mode, self.cooldown, self.injection_prob, self.injection_mode)
+ 
 
         # Initialize network
         try:
@@ -282,8 +285,16 @@ class ClassificationModel(pl.LightningModule):
             if len(v.size()) == 0:
                 self.log(f"{mode}_{k.lower()}", v, on_epoch=True)
 
+        if mode == "val":
+            print(metrics)
+            self.last_val_acc = metrics["acc"].detach().clone()
+
         if mode == "test":
             self.test_metric_outputs.append(metrics["stats"])
+
+        if mode == "train":
+            self.log("val_acc_step", self.last_val_acc.to(self.device), on_step=True)
+            self.last_val_acc = torch.tensor(0.0, device=self.device)
 
         return loss
 
@@ -294,26 +305,26 @@ class ClassificationModel(pl.LightningModule):
     def validation_step(self, batch, _):
         return self.shared_step(batch, "val")
 
-    def test_step(self, batch, _):
-        return self.shared_step(batch, "test")
+    # def test_step(self, batch, _):
+    #     return self.shared_step(batch, "test")
 
-    def on_test_epoch_end(self):
-        """Save per-class accuracies to csv"""
-        # Aggregate all batch stats
-        combined_stats = torch.sum(
-            torch.stack(self.test_metric_outputs, dim=-1), dim=-1
-        )
+    # def on_test_epoch_end(self):
+    #     """Save per-class accuracies to csv"""
+    #     # Aggregate all batch stats
+    #     combined_stats = torch.sum(
+    #         torch.stack(self.test_metric_outputs, dim=-1), dim=-1
+    #     )
 
-        # Calculate accuracy per class
-        per_class_acc = []
-        for tp, _, _, _, sup in combined_stats:
-            acc = tp / sup
-            per_class_acc.append((acc.item(), sup.item()))
+    #     # Calculate accuracy per class
+    #     per_class_acc = []
+    #     for tp, _, _, _, sup in combined_stats:
+    #         acc = tp / sup
+    #         per_class_acc.append((acc.item(), sup.item()))
 
-        # Save to csv
-        df = pd.DataFrame(per_class_acc, columns=["acc", "n"])
-        df.to_csv("per-class-acc-test.csv")
-        print("Saved per-class results in per-class-acc-test.csv")
+    #     # Save to csv
+    #     df = pd.DataFrame(per_class_acc, columns=["acc", "n"])
+    #     df.to_csv("per-class-acc-test.csv")
+    #     print("Saved per-class results in per-class-acc-test.csv")
 
     def configure_optimizers(self):
         # Initialize optimizer
@@ -344,25 +355,55 @@ class ClassificationModel(pl.LightningModule):
             )
 
         # Initialize learning rate scheduler
+        
         if self.scheduler == "cosine":
             scheduler = get_cosine_schedule_with_warmup(
                 optimizer,
                 num_training_steps=int(self.trainer.estimated_stepping_batches),
                 num_warmup_steps=self.warmup_steps,
             )
-        elif self.scheduler == "custom_plateau":
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step"
+                }
+            }
+        elif self.scheduler == "random_plateau":
+
             scheduler = CustomReduceOnPlateau(
                 optimizer, mode="max", factor=self.factor, patience=self.patience, injection_prob=self.injection_prob,
                 injection_factor=self.injection_factor, injection_mode=self.injection_mode,
-                threshold=self.threshold, threshold_mode=self.threshold_mode, cooldown=self.cooldown, min_lr=self.min_lr
+                threshold=self.threshold, threshold_mode=self.threshold_mode, cooldown=self.cooldown, min_lr=self.min_lr, warmup_steps=self.warmup_steps, lr=self.lr, num_step=50
             )
 
-        elif self.scheduler == "cosine-warm-restarts":
+
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step",
+                    "monitor": "val_acc_step"
+                }
+            }
+
+        elif self.scheduler == "cosine_restart":
             scheduler = DecayingCosineAnnealingWarmRestartsWithShuffle(
-                optimizer, T_0=self.t_0, T_mult=self.t_mul, decay_factor=self.decay, eta_min=self.min_lr
+                optimizer, T_0=self.t_0, T_mult=self.t_mul, decay_factor=self.decay, eta_min=self.min_lr, warmup_steps=self.warmup_steps
             )
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step"
+                }
+            }
+
+
+
         elif self.scheduler == "plateau":
-                    scheduler = ReduceLROnPlateau(
+
+                    scheduler = CustomReduceOnPlateau(
                         optimizer,
                         mode="max",
                         factor=self.factor,
@@ -370,21 +411,33 @@ class ClassificationModel(pl.LightningModule):
                         threshold=self.threshold,
                         threshold_mode=self.threshold_mode,
                         cooldown=self.cooldown,
-                        min_lr=self.min_lr
+                        min_lr=self.min_lr,
+                        warmup_steps=self.warmup_steps,
+                        injection_mode=self.injection_mode,
+                        lr=self.lr,
+                        num_step=50
                     )
+                    return {
+                        "optimizer": optimizer,
+                        "lr_scheduler": {
+                            "scheduler": scheduler,
+                            "interval": "step",
+                            "monitor": "val_acc_step"
+                        }
+                    }
                 
         elif self.scheduler == "none":
             scheduler = LambdaLR(optimizer, lambda _: 1)
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step"
+                }
+            }
         else:
             raise ValueError(
-                f"{self.scheduler} is not an available optimizer. Should be one of ['cosine', 'none']"
+                f"{self.scheduler} is not an available optimizer."
             )
 
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step",
-            },
-            "monitor": "val_acc"
-        }
+

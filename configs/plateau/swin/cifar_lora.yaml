@@ -2,13 +2,13 @@
 trainer:
   accelerator: gpu
   devices: 1
-  precision: 16-mixed
+  precision: 16
   logger:
     class_path: pytorch_lightning.loggers.CSVLogger
     init_args:
       save_dir: output
       name: swin
-  max_steps: 5000
+  max_steps: 30000
   val_check_interval: 100
 model:
   model_name: "swin"
@@ -21,12 +21,13 @@ model:
   warmup_steps: 500
   lora_r: 8
   lora_alpha: 8
+  injection_mode: none
 
 
 
   min_lr: 1e-6
-  threshhold: 1e-4
-  patience: 5
+  threshold: 1e-4
+  patience: 7
   cooldown: 0
   factor: 0.5
 data:

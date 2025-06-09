@@ -7,11 +7,12 @@ from torch.utils.data import DataLoader, IterableDataset
 from tqdm.auto import tqdm
 import time, random as _rand
 import math, os, argparse, random
+import torch.nn.functional as F
 
 class DecayingCosineAnnealingWarmRestartsWithShuffle(LRScheduler):
     def __init__(
         self, optimizer, T_0, T_mult=1, decay_factor=0.9,
-        eta_min=0, last_epoch=-1
+        eta_min=0, last_epoch=-1, warmup_steps=500
     ):
         self.T_0, self.T_mult = T_0, T_mult  # T_0 is now in terms of iterations
         self.decay_factor, self.eta_min = decay_factor, eta_min
@@ -23,6 +24,7 @@ class DecayingCosineAnnealingWarmRestartsWithShuffle(LRScheduler):
 
         self.original_schedule = []
         self.all_original_lrs = []
+        self.warmup_steps = warmup_steps
 
         super().__init__(optimizer, last_epoch)
 
@@ -53,6 +55,18 @@ class DecayingCosineAnnealingWarmRestartsWithShuffle(LRScheduler):
         return [lrs[self.T_cur] for lrs in self.original_schedule]
 
     def step(self, epoch=None):
+        if self.last_epoch < self.warmup_steps:
+                self.last_epoch += 1
+                # Linear warmup from 0 to base_lr
+                warmup_ratio = self.last_epoch / self.warmup_steps
+                new_lrs = [base_lr * warmup_ratio for base_lr in self.base_max_lrs]
+                for pg, lr in zip(self.optimizer.param_groups, new_lrs):
+                    pg['lr'] = lr
+                self._last_lr = new_lrs
+                return
+
+
+
         self._generate_schedule()
         if self.T_cur >= self.T_i:
             self.cycle += 1
@@ -66,16 +80,19 @@ class DecayingCosineAnnealingWarmRestartsWithShuffle(LRScheduler):
         for pg, lr in zip(self.optimizer.param_groups, new_lrs):
             pg['lr'] = lr
         self._last_lr = new_lrs
+        return
 
 
 class CustomReduceOnPlateau(ReduceLROnPlateau):
     def __init__(self, optimizer, mode='max', factor=0.5, patience=5, 
                  threshold=1e-4, threshold_mode='rel', cooldown=0, 
                  min_lr=0, eps=1e-8, verbose=False, injection_prob=0.2, 
-                 injection_mode='fixed', injection_factor=1.5):
+                 injection_mode='fixed', injection_factor=1.5, warmup_steps=500, lr=0.05, num_step=50):
+        
 
         super().__init__(optimizer, mode, factor, patience, threshold, 
                          threshold_mode, cooldown, min_lr, eps, verbose)
+
         
         # Store custom attributes specific to this class
         self.injection_prob = injection_prob
@@ -83,6 +100,10 @@ class CustomReduceOnPlateau(ReduceLROnPlateau):
         self.injection_mode = injection_mode  # 'fixed' or 'long_tail'
         self.original_lrs = None  # Store original learning rates during injection
         self.min_lr = min_lr  # Store minimum learning rate
+        self.warmup_steps = warmup_steps
+        self.base_max_lrs = [lr for g in optimizer.param_groups]
+        self.num_step = num_step
+
 
         # Predefine a long-tail distribution for injection factors
         self.injection_distribution = self._generate_long_tail_distribution()
@@ -101,6 +122,24 @@ class CustomReduceOnPlateau(ReduceLROnPlateau):
             self.original_lrs = None
 
     def step(self, metrics, epoch=None):
+        self.last_epoch += 1
+        if self.last_epoch < self.warmup_steps:
+            warmup_ratio = self.last_epoch / self.warmup_steps
+            new_lrs = [base_lr * warmup_ratio for base_lr in self.base_max_lrs]
+            for pg, lr in zip(self.optimizer.param_groups, new_lrs):
+                    pg['lr'] = lr
+            self._last_lr = new_lrs
+            return
+        print(metrics)
+        if metrics.item() == 0.0:
+            print("metric=0")
+
+            return
+
+
+
+
+
         # Restore original learning rates if they were modified
         ori_num_of_bad_epochs = self.num_bad_epochs
         self.restore_original_lr()
@@ -108,6 +147,11 @@ class CustomReduceOnPlateau(ReduceLROnPlateau):
 
         # Perform the regular ReduceLROnPlateau step
         super().step(metrics, epoch)
+
+        current_lrs = [pg['lr'] for pg in self.optimizer.param_groups]
+        if all(abs(clr - blr) < 1e-10 for clr, blr in zip(current_lrs, self.base_max_lrs)):
+            print("Current learning rates equal to base max learning rates. Skip step.")
+            return
 
 
         # Probabilistically inject a large learning rate
@@ -119,9 +163,10 @@ class CustomReduceOnPlateau(ReduceLROnPlateau):
                 for param_group in self.optimizer.param_groups:
                     param_group['lr'] = param_group['lr'] * injection_factor
                 self.num_bad_epochs = ori_num_of_bad_epochs 
-    
             return self.original_lrs
-        else:
+            
+        elif self.injection_mode == 'random':
+
             self.original_lrs = [pg['lr'] for pg in self.optimizer.param_groups]  # Save original learning rates
             injection_factor = random.choice(self.injection_distribution)  # Sample from the predefined distribution
             for param_group in self.optimizer.param_groups:
@@ -129,3 +174,6 @@ class CustomReduceOnPlateau(ReduceLROnPlateau):
             if injection_factor > 1.0:
                 self.num_bad_epochs = ori_num_of_bad_epochs 
             return self.original_lrs
+        else:
+            print("original")
+            return

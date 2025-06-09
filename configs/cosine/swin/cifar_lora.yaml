@@ -8,8 +8,8 @@ trainer:
     init_args:
       save_dir: output
       name: swin
-  max_steps: 5000
-  val_check_interval: 500
+  max_steps: 20000
+  val_check_interval: 100
 model:
   model_name: "swin"
   training_mode: lora
